@@ -345,11 +345,11 @@ def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
     """OP.GG GraphQL 응답에서 여러 경기를 파싱합니다."""
     if not opgg_response or not opgg_response.get("data"):
         return []
-    
-    matches = opgg_response["data"]["pagedAllMatches"]
-    if not matches:
+
+    matches = opgg_response.get("data", {}).get("pagedAllMatches") or []
+    if not isinstance(matches, list):
         return []
-    
+
     # 상태 매핑
     status_map = {
         "not_started": "BEFORE",
@@ -359,19 +359,42 @@ def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
     
     parsed_matches = []
     for match in matches:
-        parsed_match = {
-            "matchId": match.get("id"),
-            "startDate": match.get("scheduledAt"),
-            "status": status_map.get(match.get("status"), match.get("status")),
-            "team1": match.get("homeTeam", {}).get("acronym", ""),
-            "team2": match.get("awayTeam", {}).get("acronym", ""),
-            "team1Img": match.get("homeTeam", {}).get("imageUrl", ""),
-            "team2Img": match.get("awayTeam", {}).get("imageUrl", ""),
-            "score1": match.get("homeScore"),
-            "score2": match.get("awayScore"),
-        }
-        parsed_matches.append(parsed_match)
-    
+        if not isinstance(match, dict):
+            continue
+
+        home_team = match.get("homeTeam") or {}
+        away_team = match.get("awayTeam") or {}
+
+        team1 = home_team.get("acronym") or home_team.get("name") or ""
+        team2 = away_team.get("acronym") or away_team.get("name") or ""
+
+        team1_img = (
+            home_team.get("imageUrl")
+            or home_team.get("imageUrlLightMode")
+            or home_team.get("imageUrlDarkMode")
+            or ""
+        )
+        team2_img = (
+            away_team.get("imageUrl")
+            or away_team.get("imageUrlLightMode")
+            or away_team.get("imageUrlDarkMode")
+            or ""
+        )
+
+        parsed_matches.append(
+            {
+                "matchId": match.get("id"),
+                "startDate": match.get("scheduledAt"),
+                "status": status_map.get(match.get("status"), match.get("status")),
+                "team1": team1,
+                "team2": team2,
+                "team1Img": team1_img,
+                "team2Img": team2_img,
+                "score1": match.get("homeScore"),
+                "score2": match.get("awayScore"),
+            }
+        )
+
     return parsed_matches
 
 
