@@ -1,22 +1,7 @@
+import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-
-_TEAM_NAME_KEYS = (
-    "teamCode",
-    "nameAcronym",
-    "shortName",
-    "nameEng",
-    "name",
-)
-
-# 팀 로고용 이미지 URL 후보 키
-_TEAM_IMG_KEYS = (
-    "imageUrl",
-    "colorImageUrl",
-    "whiteImageUrl",
-    "blackImageUrl",
-)
 
 # 별칭 → 표준 키
 VALORANT_LEAGUE_ALIAS = {
@@ -40,36 +25,132 @@ VALORANT_LEAGUE_IDS = {
     "brazil":   ["633"],
 }
 
-async def fetch_lol_league_schedule_months(year_str: str, league_str: str):
-    """네이버 e스포츠 API에서 *해당 연도의 월 목록*을 가져옵니다.
+async def fetch_opgg_lol_schedule(league_id: str, year: int, month: int):
+    """OP.GG GraphQL: LoL 리그 일정 조회.
 
-    `/v1/schedule/year/months` 엔드포인트를 호출해 특정 연도에
-    스케줄이 존재하는 월 정보를 반환합니다. 성공하면 원본 JSON을 그대로
-    돌려주며, 실패(HTTP 200이 아님) 시 `None` 을 반환합니다.
+    `ListPagedAllMatches` 쿼리를 통해 OP.GG에서 특정 리그/연월의 경기를
+    조회합니다. 타임존 보정은 서버 쿼리 변수의 `utcOffset`(분 단위)로 전달합니다.
 
-    매개변수
-        year_str (str): 4자리 연도 문자열. 예) 2024.
-        league_str (str): 리그 식별자(`topLeagueId`). 예) LCK.
+    Args:
+        league_id: OP.GG 리그 ID 문자열. 예) "98"(LPL), "99"(LCK).
+        year: 조회 연도. 예) 2025.
+        month: 조회 월(1-12).
 
-    반환값
-        dict | None: 응답 코드가 200이면 JSON 딕셔너리, 아니면 `None`.
+    Returns:
+        dict | None: 성공 시 원본 GraphQL JSON. 실패 시 `None`.
     """
-    url = 'https://esports-api.game.naver.com/service/v1/schedule/year/months'
-
-    params = {
-        'year': year_str,
-        'topLeagueId': league_str,
-        'relay': 'false'
-    }
+    url = 'https://esports.op.gg/matches/graphql/__query__ListPagedAllMatches'
 
     headers = {
-        'origin': 'https://game.naver.com',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Whale/4.32.315.22 Safari/537.36'
+        'accept': '*/*',
+        'content-type': 'application/json',
+        'origin': 'https://esports.op.gg',
+        'referer': 'https://esports.op.gg/schedules/lpl',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
+        # 전체 GraphQL 쿼리 문자열
+    query = """fragment CoreTeam on Team {
+    id
+    name
+    acronym
+    imageUrl
+    nationality
+    foundedAt
+    imageUrlDarkMode
+    imageUrlLightMode
+    youtube
+    twitter
+    facebook
+    instagram
+    discord
+    website
+    __typename
+    }
+
+    fragment CoreMatchCompact on Match {
+    id
+    tournamentId
+    name
+    scheduledAt
+    beginAt
+    matchType
+    homeTeamId
+    homeTeam {
+        ...CoreTeam
+        __typename
+    }
+    homeScore
+    awayTeamId
+    awayTeam {
+        ...CoreTeam
+        __typename
+    }
+    awayScore
+    winnerTeam {
+        ...CoreTeam
+        __typename
+    }
+    status
+    draw
+    forfeit
+    matchVersion
+    __typename
+    }
+
+    fragment CoreTournament on Tournament {
+    id
+    name
+    beginAt
+    endAt
+    __typename
+    }
+
+    query ListPagedAllMatches($status: String, $leagueId: ID, $teamId: ID, $page: Int, $year: Int, $month: Int, $limit: Int, $utcOffset: Int) {
+    pagedAllMatches(
+        status: $status
+        leagueId: $leagueId
+        teamId: $teamId
+        page: $page
+        year: $year
+        month: $month
+        limit: $limit
+        utcOffset: $utcOffset
+    ) {
+        ...CoreMatchCompact
+        tournament {
+        ...CoreTournament
+        serie {
+            league {
+            shortName
+            region
+            __typename
+            }
+            year
+            season
+            __typename
+        }
+        __typename
+        }
+        __typename
+    }
+    }"""
+
+    data = {
+        "operationName": "ListPagedAllMatches",
+        "variables": {
+            "leagueId": league_id,
+            "year": year,
+            "month": month,
+            "teamId": None,
+            "utcOffset": 540,
+            "page": 0
+        },
+        "query": query
+    }
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, headers=headers) as response:
+        async with session.post(url, headers=headers, json=data) as response:
             if response.status == 200:
                 data = await response.json()
                 return data
@@ -78,170 +159,99 @@ async def fetch_lol_league_schedule_months(year_str: str, league_str: str):
                 print(f"❌ 롤 일정 크롤링 실패: {response.status}")
                 print(f"응답 내용: {response_text}")
                 return None
-            
-async def fetch_monthly_lol_league_schedule(year_month_str: str, league_str: str):
-    """네이버 e스포츠 API에서 *특정 월*의 경기 일정을 가져옵니다.
-
-    `/v2/schedule/month` 엔드포인트를 호출해 주어진 월(YYYYMM)과
-    리그에 해당하는 경기 정보를 받아옵니다. 이 함수는 네트워크 요청만
-    수행하고, 파싱은 `parse_lol_month_days()` 에서 담당합니다.
-
-    매개변수
-        year_month_str (str): 연월 문자열 `YYYYMM`. 예) 202404.
-        league_str (str): 리그 식별자(`topLeagueId`).
-
-    반환값
-        dict | None: 성공 시 JSON 딕셔너리, 실패 시 `None`.
-    """
-    url = 'https://esports-api.game.naver.com/service/v2/schedule/month'
-
-    params = {
-        'month': year_month_str,
-        'topLeagueId': league_str,
-        'relay': 'false'
-    }
-
-    headers = {
-        'origin': 'https://game.naver.com',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Whale/4.32.315.22 Safari/537.36'
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data
-            else:
-                response_text = await response.text()
-                print(f"❌ 롤 일정 크롤링 실패: {response.status}")
-                print(f"응답 내용: {response_text}")
-
-def _find_team_name(team: dict | None) -> str | None:
-    """팀 객체 딕셔너리에서 사용하기 좋은 이름을 찾아 반환합니다."""
-    if not isinstance(team, dict):
-        return None
-    for key in _TEAM_NAME_KEYS:
-        val = team.get(key)
-        if val:
-            return str(val)
-    return None
 
 
-def _normalize_start_date(value):
-    """startDate 값이 epoch(ms) 이면 ISO 문자열로 변환하고, 이미 문자열이면 그대로 반환"""
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
-    return str(value)
+def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
+    """OP.GG GraphQL 응답에서 경기 리스트를 납작한 구조로 파싱.
 
-def _extract_match_basic(match_obj: dict) -> dict:
-    """내부 match 객체에서 핵심 정보를 추려낸다.
-    반환 필드
-        matchId, startDate(ISO), status, leagueName, blockName, team1, team2
-    일부 필드는 소스 JSON 버전에 따라 키가 다를 수 있어 최대한 유연하게 대응한다.
-    """
-    # 기본 키 매핑
-    match_id = match_obj.get("matchId") or match_obj.get("id")
-    start_date = _normalize_start_date(match_obj.get("startDate") or match_obj.get("startTime"))
-    status = match_obj.get("status") or match_obj.get("matchStatus")
-    league_name = match_obj.get("leagueName") or match_obj.get("league")
-    block_name = match_obj.get("blockName") or match_obj.get("stageName")
-
-    # 점수 추출 (진행 중/종료 경기)
-    score1 = match_obj.get("homeScore") or match_obj.get("team1Score") or match_obj.get("score1")
-    score2 = match_obj.get("awayScore") or match_obj.get("team2Score") or match_obj.get("score2")
-
-    # 팀 추출
-    team1 = team2 = None
-    img1 = img2 = None
-    if "teams" in match_obj and isinstance(match_obj["teams"], list):
-        teams_data = match_obj["teams"]
-        if len(teams_data) >= 1:
-            team1 = _find_team_name(teams_data[0])
-            img1 = _find_team_img(teams_data[0])
-        if len(teams_data) >= 2:
-            team2 = _find_team_name(teams_data[1])
-            img2 = _find_team_img(teams_data[1])
-    elif "homeTeam" in match_obj or "awayTeam" in match_obj:
-        # v2/month 응답 구조 (homeTeam / awayTeam)
-        home = match_obj.get("homeTeam")
-        away = match_obj.get("awayTeam")
-        team1 = _find_team_name(home)
-        team2 = _find_team_name(away)
-        img1 = _find_team_img(home)
-        img2 = _find_team_img(away)
-    else:
-        # 평탄화된 키로 들어오는 경우 (team1Name / team2Name)
-        team1 = match_obj.get("team1Name") or match_obj.get("homeTeamName")
-        team2 = match_obj.get("team2Name") or match_obj.get("awayTeamName")
-
-    return {
-        "matchId": match_id,
-        "startDate": start_date,
-        "status": status,
-        "leagueName": league_name,
-        "blockName": block_name,
-        "team1": team1,
-        "team2": team2,
-        "team1Img": img1,
-        "team2Img": img2,
-        "score1": score1,
-        "score2": score2,
-    }
-
-
-def parse_lol_month_days(days_resp: dict) -> list[dict]:
-    """schedule/month API 응답(JSON)을 받아 날짜 구분 없이 match 단위로 납작하게 반환.
+    홈/원정 팀 정보가 누락된 경우에도 예외 없이 빈 문자열/빈 값으로 보정합니다.
 
     Args:
-        days_resp (dict): fetch_lol_league_schedule_days() 로 받은 원본 JSON
+        opgg_response: `ListPagedAllMatches` GraphQL 응답 딕셔너리.
 
     Returns:
-        List[Dict]: 경기별 핵심 정보를 담은 리스트
+        list[dict]: 각 경기마다 다음 키를 포함
+            - matchId, startDate(KST ISO), status(BEFORE/STARTED/END),
+              team1/2, team1Img/2Img, score1/2
     """
-    if not days_resp or days_resp.get("code") != 200:
+    if not opgg_response or not opgg_response.get("data"):
         return []
 
-    matches: list[dict] = []
+    matches = opgg_response.get("data", {}).get("pagedAllMatches") or []
+    if not isinstance(matches, list):
+        return []
 
-    content = days_resp.get("content")
+    # 상태 매핑
+    status_map = {
+        "not_started": "BEFORE",
+        "running": "STARTED", 
+        "finished": "END"
+    }
+    
+    parsed_matches = []
+    KST = ZoneInfo("Asia/Seoul")
 
-    def _yield_match_objs(node):
-        # content dict (v2) -> matches
-        if isinstance(node, dict):
-            if "matches" in node:
-                for m in node["matches"]:
-                    yield m
-            elif "matchId" in node:
-                yield node
-            else:
-                # date + matchList 구조
-                ml = node.get("matchList") or node.get("matches")
-                if ml:
-                    for m in ml:
-                        yield m
-        elif isinstance(node, list):
-            for item in node:
-                yield from _yield_match_objs(item)
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
 
-    for obj in _yield_match_objs(content):
-        matches.append(_extract_match_basic(obj))
+        home_team = match.get("homeTeam") or {}
+        away_team = match.get("awayTeam") or {}
 
-    return matches
+        team1 = home_team.get("acronym") or home_team.get("name") or ""
+        team2 = away_team.get("acronym") or away_team.get("name") or ""
 
-def _find_team_img(team: dict | None) -> str | None:
-    """팀 객체 딕셔너리에서 사용하기 좋은 로고 URL을 찾아 반환합니다."""
-    if not isinstance(team, dict):
-        return None
-    for key in _TEAM_IMG_KEYS:
-        url = team.get(key)
-        if url:
-            return str(url)
-    return None
+        team1_img = (
+            home_team.get("imageUrl")
+            or home_team.get("imageUrlLightMode")
+            or home_team.get("imageUrlDarkMode")
+            or ""
+        )
+        team2_img = (
+            away_team.get("imageUrl")
+            or away_team.get("imageUrlLightMode")
+            or away_team.get("imageUrlDarkMode")
+            or ""
+        )
+
+        # UTC 시간포맷을 KST로 변환해 저장
+        sched_str = match.get("scheduledAt")
+        start_kst_iso = None
+        if isinstance(sched_str, str) and sched_str:
+            try:
+                utc_dt = datetime.fromisoformat(sched_str.replace("Z", "+00:00"))
+                start_kst_iso = utc_dt.astimezone(KST).isoformat()
+            except Exception:
+                start_kst_iso = sched_str
+
+        parsed_matches.append(
+            {
+                "matchId": match.get("id"),
+                "startDate": start_kst_iso,
+                "status": status_map.get(match.get("status"), match.get("status")),
+                "team1": team1,
+                "team2": team2,
+                "team1Img": team1_img,
+                "team2Img": team2_img,
+                "score1": match.get("homeScore"),
+                "score2": match.get("awayScore"),
+            }
+        )
+
+    return parsed_matches
 
 
 async def fetch_valorant_league_schedule(league_input: str):
-    """
-    발로란트 리그 일정을 크롤링합니다.
+    """OP.GG Valorant: 별칭 기반 시리즈들에 대한 30일 범위 경기 조회.
+
+    사용자 입력 별칭을 표준 키로 정규화한 뒤, 해당 표준 키에 매핑된 시리즈 ID 목록을
+    사용하여 오늘부터 30일 범위의 경기를 조회합니다. 결과는 KST로 변환해 반환합니다.
+
+    Args:
+        league_input: 리그 별칭(예: "퍼시픽", "PACIFIC", "masters", "EMEA").
+
+    Returns:
+        list[dict] | None: 경기 리스트(각 경기의 시작 시간이 KST ISO 형식). 없으면 `None`.
     """
     # 1. 입력받은 별칭(league_input)으로 표준 키 찾기
     standard_key = VALORANT_LEAGUE_ALIAS.get(league_input.lower())
@@ -338,5 +348,4 @@ async def fetch_valorant_league_schedule(league_input: str):
             
 
 if __name__ == "__main__":
-    import asyncio
-    print(asyncio.run(fetch_valorant_league_schedule("퍼시픽")))
+    print(asyncio.run(fetch_opgg_lol_schedule("98", 2025, 9)))
