@@ -171,7 +171,7 @@ def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
 
     Returns:
         list[dict]: 각 경기마다 다음 키를 포함
-            - matchId, startDate, status(BEFORE/STARTED/END),
+            - matchId, startDate(KST ISO), status(BEFORE/STARTED/END),
               team1/2, team1Img/2Img, score1/2
     """
     if not opgg_response or not opgg_response.get("data"):
@@ -189,6 +189,8 @@ def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
     }
     
     parsed_matches = []
+    KST = ZoneInfo("Asia/Seoul")
+
     for match in matches:
         if not isinstance(match, dict):
             continue
@@ -212,10 +214,20 @@ def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
             or ""
         )
 
+        # UTC 시간포맷을 KST로 변환해 저장
+        sched_str = match.get("scheduledAt")
+        start_kst_iso = None
+        if isinstance(sched_str, str) and sched_str:
+            try:
+                utc_dt = datetime.fromisoformat(sched_str.replace("Z", "+00:00"))
+                start_kst_iso = utc_dt.astimezone(KST).isoformat()
+            except Exception:
+                start_kst_iso = sched_str
+
         parsed_matches.append(
             {
                 "matchId": match.get("id"),
-                "startDate": match.get("scheduledAt"),
+                "startDate": start_kst_iso,
                 "status": status_map.get(match.get("status"), match.get("status")),
                 "team1": team1,
                 "team2": team2,
