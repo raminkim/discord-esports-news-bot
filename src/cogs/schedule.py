@@ -4,10 +4,7 @@ from zoneinfo import ZoneInfo
 import certifi
 from discord.ext import commands, tasks
 from crawlers.schedule_crawling import (
-    fetch_lol_league_schedule_months,
-    fetch_monthly_lol_league_schedule,
     fetch_valorant_league_schedule,
-    parse_lol_month_days,
     fetch_opgg_lol_schedule,
     parse_opgg_matches_list,
 )
