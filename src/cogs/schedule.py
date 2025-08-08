@@ -322,7 +322,6 @@ class ScheduleCommand(commands.Cog):
                 break
 
         if not upcoming:
-            await safe_send(ctx, "❌ 예정된 롤 경기를 찾을 수 없습니다.")
             return
 
         upcoming.sort(key=lambda m: m["startDate"])
