@@ -1,3 +1,4 @@
+import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -116,6 +117,130 @@ async def fetch_monthly_lol_league_schedule(year_month_str: str, league_str: str
                 print(f"❌ 롤 일정 크롤링 실패: {response.status}")
                 print(f"응답 내용: {response_text}")
 
+
+async def fetch_opgg_lol_schedule(league_id: str, year: int, month: int):
+    url = 'https://esports.op.gg/matches/graphql/__query__ListPagedAllMatches'
+
+    headers = {
+        'accept': '*/*',
+        'content-type': 'application/json',
+        'origin': 'https://esports.op.gg',
+        'referer': 'https://esports.op.gg/schedules/lpl',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+        # 전체 GraphQL 쿼리 문자열
+    query = """fragment CoreTeam on Team {
+    id
+    name
+    acronym
+    imageUrl
+    nationality
+    foundedAt
+    imageUrlDarkMode
+    imageUrlLightMode
+    youtube
+    twitter
+    facebook
+    instagram
+    discord
+    website
+    __typename
+    }
+
+    fragment CoreMatchCompact on Match {
+    id
+    tournamentId
+    name
+    scheduledAt
+    beginAt
+    matchType
+    homeTeamId
+    homeTeam {
+        ...CoreTeam
+        __typename
+    }
+    homeScore
+    awayTeamId
+    awayTeam {
+        ...CoreTeam
+        __typename
+    }
+    awayScore
+    winnerTeam {
+        ...CoreTeam
+        __typename
+    }
+    status
+    draw
+    forfeit
+    matchVersion
+    __typename
+    }
+
+    fragment CoreTournament on Tournament {
+    id
+    name
+    beginAt
+    endAt
+    __typename
+    }
+
+    query ListPagedAllMatches($status: String, $leagueId: ID, $teamId: ID, $page: Int, $year: Int, $month: Int, $limit: Int, $utcOffset: Int) {
+    pagedAllMatches(
+        status: $status
+        leagueId: $leagueId
+        teamId: $teamId
+        page: $page
+        year: $year
+        month: $month
+        limit: $limit
+        utcOffset: $utcOffset
+    ) {
+        ...CoreMatchCompact
+        tournament {
+        ...CoreTournament
+        serie {
+            league {
+            shortName
+            region
+            __typename
+            }
+            year
+            season
+            __typename
+        }
+        __typename
+        }
+        __typename
+    }
+    }"""
+
+    data = {
+        "operationName": "ListPagedAllMatches",
+        "variables": {
+            "leagueId": league_id,
+            "year": year,
+            "month": month,
+            "teamId": None,
+            "utcOffset": 540,
+            "page": 0
+        },
+        "query": query
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=data) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data
+            else:
+                response_text = await response.text()
+                print(f"❌ 롤 일정 크롤링 실패: {response.status}")
+                print(f"응답 내용: {response_text}")
+                return None
+
+
 def _find_team_name(team: dict | None) -> str | None:
     """팀 객체 딕셔너리에서 사용하기 좋은 이름을 찾아 반환합니다."""
     if not isinstance(team, dict):
@@ -178,8 +303,6 @@ def _extract_match_basic(match_obj: dict) -> dict:
         "matchId": match_id,
         "startDate": start_date,
         "status": status,
-        "leagueName": league_name,
-        "blockName": block_name,
         "team1": team1,
         "team2": team2,
         "team1Img": img1,
@@ -187,6 +310,70 @@ def _extract_match_basic(match_obj: dict) -> dict:
         "score1": score1,
         "score2": score2,
     }
+
+def parse_opgg_lol_schedule(schedule_resp: dict) -> dict:
+    """opgg 응답을 파싱해 경기 정보를 반환합니다."""
+    id = schedule_resp.get("id")
+    start_date = schedule_resp.get("scheduledAt")
+    status = schedule_resp.get("status")
+
+    # 홈 팀 정보
+    home_team = schedule_resp.get("homeTeam", {})
+    team1 = home_team.get("acronym", "")
+    team1_img = home_team.get("imageUrl", "")
+    score1 = schedule_resp.get("homeScore", "")
+
+    # 원정 팀 정보
+    away_team = schedule_resp.get("awayTeam", {})
+    team2 = away_team.get("acronym", "")
+    team2_img = away_team.get("imageUrl", "")
+    score2 = schedule_resp.get("awayScore", "")
+
+    return {
+        "matchId": id,
+        "startDate": start_date,
+        "status": status,
+        "team1": team1,
+        "team2": team2,
+        "team1Img": team1_img,
+        "team2Img": team2_img,
+        "score1": score1,
+        "score2": score2,
+    }
+
+def parse_opgg_matches_list(opgg_response: dict) -> list[dict]:
+    """OP.GG GraphQL 응답에서 여러 경기를 파싱합니다."""
+    if not opgg_response or not opgg_response.get("data"):
+        return []
+    
+    matches = opgg_response["data"]["pagedAllMatches"]
+    if not matches:
+        return []
+    
+    # 상태 매핑
+    status_map = {
+        "not_started": "BEFORE",
+        "running": "STARTED", 
+        "finished": "END"
+    }
+    
+    parsed_matches = []
+    for match in matches:
+        parsed_match = {
+            "matchId": match.get("id"),
+            "startDate": match.get("scheduledAt"),
+            "status": status_map.get(match.get("status"), match.get("status")),
+            "team1": match.get("homeTeam", {}).get("acronym", ""),
+            "team2": match.get("awayTeam", {}).get("acronym", ""),
+            "team1Img": match.get("homeTeam", {}).get("imageUrl", ""),
+            "team2Img": match.get("awayTeam", {}).get("imageUrl", ""),
+            "score1": match.get("homeScore"),
+            "score2": match.get("awayScore"),
+        }
+        parsed_matches.append(parsed_match)
+    
+    return parsed_matches
+
 
 
 def parse_lol_month_days(days_resp: dict) -> list[dict]:
@@ -338,5 +525,4 @@ async def fetch_valorant_league_schedule(league_input: str):
             
 
 if __name__ == "__main__":
-    import asyncio
-    print(asyncio.run(fetch_valorant_league_schedule("퍼시픽")))
+    print(asyncio.run(fetch_opgg_lol_schedule("98", 2025, 9)))

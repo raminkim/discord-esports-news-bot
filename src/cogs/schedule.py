@@ -3,7 +3,14 @@ from typing import List
 from zoneinfo import ZoneInfo
 import certifi
 from discord.ext import commands, tasks
-from crawlers.schedule_crawling import fetch_lol_league_schedule_months, fetch_monthly_lol_league_schedule, fetch_valorant_league_schedule, parse_lol_month_days
+from crawlers.schedule_crawling import (
+    fetch_lol_league_schedule_months,
+    fetch_monthly_lol_league_schedule,
+    fetch_valorant_league_schedule,
+    parse_lol_month_days,
+    fetch_opgg_lol_schedule,
+    parse_opgg_matches_list,
+)
 from datetime import datetime, timezone
 import discord
 import io
@@ -24,14 +31,15 @@ async def safe_send(ctx_or_channel, content=None, **kwargs):
         return None
 
 LOL_LEAGUE_TYPE = {
-    "LCK": "lck",
-    "LPL": "lpl",
-    "LEC": "lec",
-    "LCS": "lcs",
-    "MSI": "msi",
-    "WORLDS": "wrl",
-    "LJL": "ljl",
-    "EWC": "ewc_lol"
+    "LPL": 98,
+    "LCK": 99,
+    "LEC": 89,
+    "LTA North": 140,
+    "LTA South": 139,
+    "LCP": 138,
+    "First Stand": 141,
+    "MSI": 100,
+    "Worlds": 96
 }
 
 VALORANT_LEAGUE_TYPE = {
@@ -268,31 +276,47 @@ class ScheduleCommand(commands.Cog):
                 traceback.print_exc()
                 continue
 
-    async def get_lol_league_schedule(self, ctx: commands.Context, league_code: str) -> List[dict]:
-        now_dt = datetime.now(timezone.utc)
-        today_iso = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        today_kst = now_dt.astimezone(ZoneInfo("Asia/Seoul")).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        now_ym = now_dt.strftime("%Y-%m")
+    async def get_lol_league_schedule(self, ctx: commands.Context, league_code: int) -> List[dict]:
+        """OP.GG GraphQL을 사용해 LoL 리그 일정을 조회합니다.
 
-        # 월 목록 조회
-        year_str = now_dt.strftime("%Y")
-        months_resp = await fetch_lol_league_schedule_months(year_str, league_code)
-        months_list: list[str] = (months_resp or {}).get("content", [])
-        months_list = [m for m in months_list if m >= now_ym]
+        버튼에서 전달받은 `league_code`를 그대로 사용해 현재 달과 필요 시 다음 달까지 조회하여
+        향후 4경기까지 반환합니다. 임베드 생성 로직이 기대하는 키(`team1Img`, `team2Img`, `startDate` 등)
+        는 `parse_opgg_matches_list` 결과를 그대로 사용하며, `startDate`는 Python에서 파싱 가능한
+        ISO 형태로 보정합니다.
+        """
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        def _normalize_iso(dt_str: str | None) -> str | None:
+            if not dt_str:
+                return None
+            # Python fromisoformat 호환을 위해 'Z'를 '+00:00'로 교체
+            return dt_str.replace('Z', '+00:00')
+
+        def _year_month_with_offset(base_year: int, base_month: int, offset: int) -> tuple[int, int]:
+            month = base_month + offset
+            year = base_year + (month - 1) // 12
+            month = ((month - 1) % 12) + 1
+            return year, month
 
         upcoming: list[dict] = []
 
-        # 월별 일정 수집
-        for i, ym in enumerate(months_list):
-            if i > 0:
-                await asyncio.sleep(1)
-                
-            print(f"월 일정 조회: {ym}")
-            month_resp = await fetch_monthly_lol_league_schedule(ym, league_code)
-            if not month_resp:
+        # 현재 달부터 최대 다음 달까지 조회하여 4경기 수집
+        for offset in (0, 1):
+            y, m = _year_month_with_offset(now_dt.year, now_dt.month, offset)
+            try:
+                resp = await fetch_opgg_lol_schedule(str(league_code), y, m)
+            except Exception as e:
+                print(f"OP.GG 일정 조회 실패 (league={league_code}, {y}-{m}): {e}")
                 continue
-            for match in parse_lol_month_days(month_resp):
-                if match["startDate"] and match["startDate"] >= today_iso:
+
+            matches = parse_opgg_matches_list(resp)
+            for match in matches:
+                start_date_norm = _normalize_iso(match.get("startDate"))
+                if not start_date_norm:
+                    continue
+                match["startDate"] = start_date_norm
+                if start_date_norm >= now_iso:
                     upcoming.append(match)
             if len(upcoming) >= 4:
                 break
